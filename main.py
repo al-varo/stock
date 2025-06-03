@@ -5,66 +5,66 @@ def nilai_stok_average_cost(conn, tanggal, lokasi_internal_id=8):
     cursor = conn.cursor()
 
     query = """
-        WITH
-        masuk AS (
-            SELECT
-                sm.product_id,
-                SUM(sm.product_qty) AS qty_in,
-                SUM(sm.product_qty * COALESCE(sm.price_unit, ip.value_float)) AS nilai_in
-            FROM stock_move sm
-            JOIN product_product pp ON sm.product_id = pp.id
-            JOIN product_template pt ON pp.product_tmpl_id = pt.id
-            LEFT JOIN ir_property ip ON ip.name = 'standard_price'
-                AND ip.res_id = ('product.template,' || pt.id)
-            WHERE sm.state = 'done'
-                AND sm.location_dest_id = %(lokasi_id)s
-                AND sm.location_id != %(lokasi_id)s
-                AND sm.date <= %(tanggal)s
-            GROUP BY sm.product_id
-        ),
-        keluar AS (
-            SELECT
-                sm.product_id,
-                SUM(sm.product_qty) AS qty_out
-            FROM stock_move sm
-            WHERE sm.state = 'done'
-                AND sm.location_id = %(lokasi_id)s
-                AND sm.location_dest_id != %(lokasi_id)s
-                AND sm.date <= %(tanggal)s
-            GROUP BY sm.product_id
-        )
+WITH
+masuk AS (
+    SELECT
+        sm.product_id,
+        SUM(sm.product_qty) AS qty_in,
+        SUM(sm.product_qty * COALESCE(sm.price_unit, ip.value_float)) AS nilai_in
+    FROM stock_move sm
+    JOIN product_product pp ON sm.product_id = pp.id
+    JOIN product_template pt ON pp.product_tmpl_id = pt.id
+    LEFT JOIN ir_property ip ON ip.name = 'standard_price'
+        AND ip.res_id = ('product.template,' || pt.id)
+    WHERE sm.state = 'done'
+        AND sm.location_dest_id = %(lokasi_id)s
+        AND sm.location_id != %(lokasi_id)s
+        AND sm.date <= %(tanggal)s
+    GROUP BY sm.product_id
+),
+keluar AS (
+    SELECT
+        sm.product_id,
+        SUM(sm.product_qty) AS qty_out
+    FROM stock_move sm
+    WHERE sm.state = 'done'
+        AND sm.location_id = %(lokasi_id)s
+        AND sm.location_dest_id != %(lokasi_id)s
+        AND sm.date <= %(tanggal)s
+    GROUP BY sm.product_id
+)
 
-        SELECT
-            pp.default_code AS kode,
-            pt.name AS nama_produk,
-            uom.name AS satuan,
-            ROUND(COALESCE(masuk.qty_in, 0) - COALESCE(keluar.qty_out, 0), 2) AS saldo_qty,
-            ROUND(
-                CASE
-                    WHEN COALESCE(masuk.qty_in, 0) > 0 THEN
-                        COALESCE(masuk.nilai_in, 0) / COALESCE(masuk.qty_in, 1)
-                    ELSE
-                        COALESCE(ip.value_float, 0)
-                END, 2
-            ) AS avg_cost,
-            ROUND((
-                COALESCE(masuk.qty_in, 0) - COALESCE(keluar.qty_out, 0)) *
-                CASE
-                    WHEN COALESCE(masuk.qty_in, 0) > 0 THEN
-                        COALESCE(masuk.nilai_in, 0) / COALESCE(masuk.qty_in, 1)
-                    ELSE
-                        COALESCE(ip.value_float, 0)
-                END, 2
-            ) AS nilai_stok
-        FROM masuk
-        LEFT JOIN keluar ON masuk.product_id = keluar.product_id
-        JOIN product_product pp ON masuk.product_id = pp.id
-        JOIN product_template pt ON pp.product_tmpl_id = pt.id
-        LEFT JOIN product_uom uom ON pt.uom_id = uom.id
-        LEFT JOIN ir_property ip ON ip.name = 'standard_price'
-            AND ip.res_id = ('product.template,' || pt.id)
-        WHERE (COALESCE(masuk.qty_in, 0) - COALESCE(keluar.qty_out, 0)) > 0
-        ORDER BY pt.name
+SELECT
+    pp.default_code AS kode,
+    pt.name AS nama_produk,
+    uom.name AS satuan,
+    ROUND((COALESCE(masuk.qty_in, 0) - COALESCE(keluar.qty_out, 0))::numeric, 2) AS saldo_qty,
+    ROUND((
+        CASE
+            WHEN COALESCE(masuk.qty_in, 0) > 0 THEN
+                COALESCE(masuk.nilai_in, 0) / COALESCE(masuk.qty_in, 1)
+            ELSE
+                COALESCE(ip.value_float, 0)
+        END
+    )::numeric, 2) AS avg_cost,
+    ROUND((
+        (COALESCE(masuk.qty_in, 0) - COALESCE(keluar.qty_out, 0)) *
+        CASE
+            WHEN COALESCE(masuk.qty_in, 0) > 0 THEN
+                COALESCE(masuk.nilai_in, 0) / COALESCE(masuk.qty_in, 1)
+            ELSE
+                COALESCE(ip.value_float, 0)
+        END
+    )::numeric, 2) AS nilai_stok
+FROM masuk
+LEFT JOIN keluar ON masuk.product_id = keluar.product_id
+JOIN product_product pp ON masuk.product_id = pp.id
+JOIN product_template pt ON pp.product_tmpl_id = pt.id
+LEFT JOIN product_uom uom ON pt.uom_id = uom.id
+LEFT JOIN ir_property ip ON ip.name = 'standard_price'
+    AND ip.res_id = ('product.template,' || pt.id)
+WHERE (COALESCE(masuk.qty_in, 0) - COALESCE(keluar.qty_out, 0)) > 0
+ORDER BY pt.name
     """
 
     cursor.execute(query, {"tanggal": tanggal, "lokasi_id": lokasi_internal_id})
