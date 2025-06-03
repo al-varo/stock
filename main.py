@@ -1,116 +1,116 @@
 import psycopg2
 import pandas as pd
+from openpyxl import Workbook
 from datetime import datetime
 
+import os
+
+# Konfigurasi koneksi PostgreSQL
+DB_CONFIG = {
+    "host": "app.manzada.net",
+    "port": 5432,
+    "dbname": "manzada",
+    "user": "offline",
+    "password": "ra#asia"
+}
+
+# Fungsi ambil harga average dari ir_property
 def ambil_harga_average(conn):
-    cursor = conn.cursor()
     query = """
         SELECT
-            REPLACE(prop.res_id, 'product.template,', '')::int AS product_tmpl_id,
-            prop.value_float AS standard_price
-        FROM
-            ir_property prop
-        WHERE
-            prop.name = 'standard_price'
-            AND prop.res_id IS NOT NULL
-            AND prop.value_float IS NOT NULL;
+            REPLACE(SPLIT_PART(name, ',', 1), 'product.template,', '')::integer AS product_template_id,
+            value_float
+        FROM ir_property
+        WHERE name = 'standard_price'
+          AND res_id IS NOT NULL
     """
-    cursor.execute(query)
-    return {row[0]: row[1] for row in cursor.fetchall()}
+    with conn.cursor() as cursor:
+        cursor.execute(query)
+        hasil = cursor.fetchall()
+        return {row[0]: float(row[1]) for row in hasil}  # Convert ke float
 
+# Fungsi ambil ID lokasi internal
 def ambil_lokasi_internal(conn):
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM stock_location WHERE usage = 'internal'")
-    return [row[0] for row in cursor.fetchall()]
+    query = "SELECT id FROM stock_location WHERE usage = 'internal'"
+    with conn.cursor() as cursor:
+        cursor.execute(query)
+        return [row[0] for row in cursor.fetchall()]
 
-def hitung_nilai_stok(conn, tanggal_snapshot):
-    lokasi_internal_ids = ambil_lokasi_internal(conn)
-    harga_avg = ambil_harga_average(conn)
-
-    cursor = conn.cursor()
-    lokasi_tuple = tuple(lokasi_internal_ids)
-
-    query = f"""
+# Fungsi menghitung qty per product template pada tanggal tertentu
+def ambil_qty_stok_per_tanggal(conn, tanggal, lokasi_ids):
+    query = """
         SELECT
-            sm.product_id,
-            pt.id AS product_tmpl_id,
-            pp.default_code,
-            pt.name,
-            uom.name AS uom_name,
-            SUM(
-                CASE
-                    WHEN sm.location_dest_id IN %s THEN sm.product_qty
-                    WHEN sm.location_id IN %s THEN -sm.product_qty
-                    ELSE 0
-                END
-            ) AS qty
+            pt.id AS product_template_id,
+            SUM(CASE WHEN sm.location_dest_id = ANY(%(lokasi_ids)s) THEN sm.product_qty
+                     WHEN sm.location_id = ANY(%(lokasi_ids)s) THEN -sm.product_qty
+                     ELSE 0 END) AS qty
         FROM stock_move sm
         JOIN product_product pp ON sm.product_id = pp.id
         JOIN product_template pt ON pp.product_tmpl_id = pt.id
-        LEFT JOIN product_uom uom ON pt.uom_id = uom.id
         WHERE sm.state = 'done'
-          AND sm.date <= %s
-          AND (
-              sm.location_id IN %s OR
-              sm.location_dest_id IN %s
-          )
-        GROUP BY sm.product_id, pt.id, pp.default_code, pt.name, uom.name
-        HAVING SUM(
-            CASE
-                WHEN sm.location_dest_id IN %s THEN sm.product_qty
-                WHEN sm.location_id IN %s THEN -sm.product_qty
-                ELSE 0
-            END
-        ) > 0
+          AND sm.date <= %(tanggal)s
+        GROUP BY pt.id
+        HAVING SUM(CASE WHEN sm.location_dest_id = ANY(%(lokasi_ids)s) THEN sm.product_qty
+                        WHEN sm.location_id = ANY(%(lokasi_ids)s) THEN -sm.product_qty
+                        ELSE 0 END) > 0
     """
+    with conn.cursor() as cursor:
+        cursor.execute(query, {"tanggal": tanggal, "lokasi_ids": lokasi_ids})
+        return {row[0]: float(row[1]) for row in cursor.fetchall()}
 
-    params = (
-        lokasi_tuple,
-        lokasi_tuple,
-        tanggal_snapshot,
-        lokasi_tuple,
-        lokasi_tuple,
-        lokasi_tuple,
-        lokasi_tuple
-    )
+# Fungsi mengambil nama produk
+def ambil_nama_produk(conn):
+    query = "SELECT id, name FROM product_template"
+    with conn.cursor() as cursor:
+        cursor.execute(query)
+        return {row[0]: row[1] for row in cursor.fetchall()}
 
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
+# Fungsi menghitung nilai stok
+def hitung_nilai_stok(conn, tanggal):
+    harga_avg = ambil_harga_average(conn)
+    lokasi_internal = ambil_lokasi_internal(conn)
+    qty_stok = ambil_qty_stok_per_tanggal(conn, tanggal, lokasi_internal)
+    nama_produk = ambil_nama_produk(conn)
 
     hasil = []
-    for row in rows:
-        product_id, tmpl_id, kode, nama, uom, qty = row
-        harga = harga_avg.get(tmpl_id, 0.0)
+    total_nilai = 0
+
+    for product_template_id, qty in qty_stok.items():
+        harga = harga_avg.get(product_template_id, 0.0)
         nilai = round(qty * harga, 2)
+        total_nilai += nilai
+
         hasil.append({
-            "Kode Produk": kode,
-            "Nama Produk": nama,
+            "Product": nama_produk.get(product_template_id, f"ID {product_template_id}"),
             "Qty": round(qty, 2),
-            "Satuan": uom,
-            "Harga Rata-rata": round(harga, 2),
-            "Nilai Stok": nilai
+            "Average Price": round(harga, 2),
+            "Total Value": nilai
         })
+
+    hasil.append({
+        "Product": "TOTAL",
+        "Qty": "",
+        "Average Price": "",
+        "Total Value": round(total_nilai, 2)
+    })
 
     return hasil
 
-def simpan_ke_excel(data, tanggal_snapshot):
+# Fungsi simpan ke Excel
+def simpan_ke_excel(data, tanggal):
     df = pd.DataFrame(data)
-    filename = f"stok_average_{tanggal_snapshot}.xlsx"
+    folder = "/app" if os.path.exists("/app") else "."
+    filename = f"{folder}/stok_averaging_{tanggal}.xlsx"
     df.to_excel(filename, index=False)
-    print(f"[✔] Disimpan ke file: {filename}")
-    return filename
+    print(f"File Excel disimpan: {filename}")
 
+# Fungsi utama
 if __name__ == "__main__":
-    # KONFIGURASI DATABASE
-    conn = psycopg2.connect(
-        host="app.manzada.net",
-        port="5432",
-        dbname="manzada",
-        user="offline",
-        password="ra#asia"
-    )
+    tanggal = "2024-12-31"  # Ubah sesuai kebutuhan
 
-    tanggal = "2024-12-31"
-    data = hitung_nilai_stok(conn, tanggal)
-    simpan_ke_excel(data, tanggal)
-    conn.close()
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        data = hitung_nilai_stok(conn, tanggal)
+        simpan_ke_excel(data, tanggal)
+    finally:
+        conn.close()
